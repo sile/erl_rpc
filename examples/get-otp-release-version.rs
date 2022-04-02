@@ -22,7 +22,12 @@ fn main() -> anyhow::Result<()> {
     smol::block_on(async {
         let client = erl_rpc::RpcClient::connect(&args.node_name.to_string(), &cookie).await?;
         let mut handle = client.handle();
-        smol::spawn(client.run()).detach();
+        smol::spawn(async {
+            if let Err(e) = client.run().await {
+                eprintln!("RpcClient Error: {}", e);
+            }
+        })
+        .detach();
 
         let result = handle
             .call(

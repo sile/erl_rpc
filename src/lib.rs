@@ -2,11 +2,12 @@ use erl_dist::epmd::{EpmdClient, NodeEntry};
 use erl_dist::handshake::{ClientSideHandshake, HandshakeStatus};
 use erl_dist::message::{self, Message};
 use erl_dist::node::{Creation, LocalNode, NodeName, PeerNode};
-use erl_dist::term::{Atom, List, Term};
+use erl_dist::term::{Atom, FixInteger, List, Mfa, Pid, Reference, Term, Tuple};
 use erl_dist::DistributionFlags;
 use futures::channel::{mpsc, oneshot};
 use futures::FutureExt;
 use smol::net::TcpStream;
+use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -53,6 +54,7 @@ pub struct RpcClient {
     req_tx: Option<mpsc::Sender<Request>>,
     local_node: LocalNode,
     peer_node: PeerNode,
+    ongoing_reqs: HashMap<Vec<u32>, oneshot::Sender<Term>>,
 }
 
 impl RpcClient {
@@ -66,6 +68,7 @@ impl RpcClient {
         let tentative_name = "nonode@localhost";
         let mut local_node = LocalNode::new(tentative_name.parse()?, Creation::random());
         local_node.flags |= DistributionFlags::NAME_ME;
+        local_node.flags |= DistributionFlags::SPAWN;
 
         let connection =
             TcpStream::connect((server_node_name.host(), server_node_entry.port)).await?;
@@ -84,6 +87,7 @@ impl RpcClient {
                 req_tx: Some(req_tx),
                 local_node,
                 peer_node,
+                ongoing_reqs: HashMap::new(),
             })
         } else {
             return Err(ConnectError::UnexpectedHandshakeStatus { status });
@@ -149,11 +153,68 @@ impl RpcClient {
     }
 
     async fn handle_req(&mut self, req: Request) -> Result<(), RunError> {
-        todo!()
+        let req_id = self.make_ref();
+        let res_id = self.make_ref();
+        let spawn_request = Message::spawn_request(
+            req_id,
+            self.pid(),
+            self.pid(),
+            Mfa {
+                module: "erpc".into(),
+                function: "execute_call".into(),
+                arity: FixInteger::from(4),
+            },
+            List::from(vec![
+                Tuple::from(vec![
+                    Atom::from("reply").into(),
+                    Atom::from("error_only").into(),
+                ])
+                .into(),
+                Atom::from("monitor").into(),
+            ]),
+            List::from(vec![
+                res_id.clone().into(),
+                req.mfargs.module.into(),
+                req.mfargs.function.into(),
+                req.mfargs.args.into(),
+            ]),
+        );
+        self.msg_tx.send(spawn_request).await?;
+        self.ongoing_reqs.insert(res_id.id.clone(), req.reply_tx);
+        // Res = make_ref(),
+        // ReqId = spawn_request(N, ?MODULE, execute_call, [Res, M, F, A],
+        //                       [{reply, error_only}, monitor]),
+        // receive
+        // {spawn_reply, ReqId, error, Reason} ->
+        //     result(spawn_reply, ReqId, Res, Reason);
+        // {'DOWN', ReqId, process, _Pid, Reason} ->
+        //     result(down, ReqId, Res, Reason)
+        //     after T ->
+        //     result(timeout, ReqId, Res, undefined)
+        //     end;
+        Ok(())
     }
 
     async fn handle_msg(&mut self, msg: Message) -> Result<(), RunError> {
+        dbg!(msg);
         todo!()
+    }
+
+    fn node(&self) -> Atom {
+        Atom::from(self.local_node.name.to_string())
+    }
+
+    fn pid(&self) -> Pid {
+        Pid::new(self.node(), 0, 0, self.local_node.creation.get())
+    }
+
+    fn make_ref(&self) -> Reference {
+        // TDOO:
+        Reference {
+            node: self.node(),
+            id: vec![0, rand::random(), rand::random()], //vec![rand::random(), rand::random(), rand::random()],
+            creation: 0,                                 // self.local_node.creation.get() as u8,
+        }
     }
 }
 

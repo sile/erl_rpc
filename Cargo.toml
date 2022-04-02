@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 erl_dist = "0.5"
 futures = "0.3"
+rand = "0.8"
 smol = "1"
 thiserror = "1"
 
