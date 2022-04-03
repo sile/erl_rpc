@@ -1,3 +1,33 @@
+//! Erlang RPC Client.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! # fn main() -> anyhow::Result<()> {
+//! smol::block_on(async {
+//!     // Connect to an Erlang node.
+//!     let erlang_node = "foo@localhost";
+//!     let cookie = "cookie-value";
+//!     let client = erl_rpc::RpcClient::connect(erlang_node, cookie).await?;
+//!     let mut handle = client.handle();
+//!
+//!     // Run the RPC client as a background task.
+//!     smol::spawn(async {
+//!         if let Err(e) = client.run().await {
+//!             eprintln!("RpcClient Error: {}", e);
+//!         }
+//!     }).detach();
+//!
+//!     // Execute an RPC: `erlang:processes/0`
+//!     let result = handle
+//!         .call("erlang".into(), "processes".into(), erl_dist::term::List::nil())
+//!         .await?;
+//!     println!("{}", result);
+//!     Ok(())
+//! })
+//! # }
+//! ```
+#![warn(missing_docs)]
 use erl_dist::epmd::{EpmdClient, NodeEntry};
 use erl_dist::handshake::{ClientSideHandshake, HandshakeStatus};
 use erl_dist::message::{self, Message};
@@ -9,8 +39,10 @@ use futures::FutureExt;
 use smol::net::TcpStream;
 use std::collections::HashMap;
 
+/// Possible errors during [`RpcClient::connect`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[allow(missing_docs)]
 pub enum ConnectError {
     #[error(
         "the server only supports the distribution protocol version 5 while the client requires 6"
@@ -36,8 +68,10 @@ pub enum ConnectError {
     IoError(#[from] std::io::Error),
 }
 
+/// Possible errors during [`RpcClientHandle::call`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[allow(missing_docs)]
 pub enum CallError {
     #[error("received an error response: {reason}")]
     ErrorResponse { reason: Term },
@@ -49,6 +83,7 @@ pub enum CallError {
     Terminated,
 }
 
+/// RPC client.
 #[derive(Debug)]
 pub struct RpcClient {
     msg_rx: Option<message::Receiver<TcpStream>>,
@@ -61,6 +96,7 @@ pub struct RpcClient {
 }
 
 impl RpcClient {
+    /// Connects to a given Erlang node.
     pub async fn connect(server_node_name: &str, cookie: &str) -> Result<Self, ConnectError> {
         let server_node_name: NodeName = server_node_name.parse()?;
         let server_node_entry = get_node_entry(&server_node_name).await?;
@@ -99,20 +135,24 @@ impl RpcClient {
         }
     }
 
+    /// Returns a handle of this client to request RPCs.
     pub fn handle(&self) -> RpcClientHandle {
         RpcClientHandle {
             req_tx: self.req_tx.clone().take().expect("unreachable"),
         }
     }
 
+    /// Returns the local node information.
     pub fn local_node(&self) -> &LocalNode {
         &self.local_node
     }
 
+    /// Returns the peer node information.
     pub fn peer_ndoe(&self) -> &PeerNode {
         &self.peer_node
     }
 
+    /// Runs a loop to handle RPC.
     pub async fn run(mut self) -> Result<(), RunError> {
         self.req_tx = None;
 
@@ -226,7 +266,10 @@ impl RpcClient {
     }
 }
 
+/// Pissible errors during [`RpcClient::run()`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+#[allow(missing_docs)]
 pub enum RunError {
     #[error("failed to execute `spawn_request` on the target node: {reason}")]
     SpawnRequestError { reason: String },
@@ -244,12 +287,14 @@ pub enum RunError {
     MessageRecvError(#[from] erl_dist::message::RecvError),
 }
 
+/// Handle of [`RpcClient`].
 #[derive(Debug, Clone)]
 pub struct RpcClientHandle {
     req_tx: mpsc::Sender<Request>,
 }
 
 impl RpcClientHandle {
+    /// Request an RPC.
     pub async fn call(
         &mut self,
         module: Atom,
