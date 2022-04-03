@@ -2,7 +2,7 @@ use erl_dist::epmd::{EpmdClient, NodeEntry};
 use erl_dist::handshake::{ClientSideHandshake, HandshakeStatus};
 use erl_dist::message::{self, Message};
 use erl_dist::node::{Creation, LocalNode, NodeName, PeerNode};
-use erl_dist::term::{Atom, FixInteger, List, Mfa, Pid, Reference, Term, Tuple};
+use erl_dist::term::{Atom, FixInteger, List, Mfa, Pid, PidOrAtom, Reference, Term};
 use erl_dist::DistributionFlags;
 use futures::channel::{mpsc, oneshot};
 use futures::FutureExt;
@@ -39,6 +39,9 @@ pub enum ConnectError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CallError {
+    #[error("received an error response: {reason}")]
+    ErrorResponse { reason: Term },
+
     #[error("send buffer is full")]
     Full,
 
@@ -54,7 +57,7 @@ pub struct RpcClient {
     req_tx: Option<mpsc::Sender<Request>>,
     local_node: LocalNode,
     peer_node: PeerNode,
-    ongoing_reqs: HashMap<Vec<u32>, oneshot::Sender<Term>>,
+    ongoing_reqs: HashMap<Reference, oneshot::Sender<Term>>,
 }
 
 impl RpcClient {
@@ -69,6 +72,8 @@ impl RpcClient {
         let mut local_node = LocalNode::new(tentative_name.parse()?, Creation::random());
         local_node.flags |= DistributionFlags::NAME_ME;
         local_node.flags |= DistributionFlags::SPAWN;
+        local_node.flags |= DistributionFlags::DIST_MONITOR;
+        local_node.flags |= DistributionFlags::DIST_MONITOR_NAME;
 
         let connection =
             TcpStream::connect((server_node_name.host(), server_node_entry.port)).await?;
@@ -154,9 +159,8 @@ impl RpcClient {
 
     async fn handle_req(&mut self, req: Request) -> Result<(), RunError> {
         let req_id = self.make_ref();
-        let res_id = self.make_ref();
         let spawn_request = Message::spawn_request(
-            req_id,
+            req_id.clone(),
             self.pid(),
             self.pid(),
             Mfa {
@@ -164,40 +168,45 @@ impl RpcClient {
                 function: "execute_call".into(),
                 arity: FixInteger::from(4),
             },
+            List::from(vec![Atom::from("monitor").into()]),
             List::from(vec![
-                Tuple::from(vec![
-                    Atom::from("reply").into(),
-                    Atom::from("error_only").into(),
-                ])
-                .into(),
-                Atom::from("monitor").into(),
-            ]),
-            List::from(vec![
-                res_id.clone().into(),
+                self.make_ref().into(),
                 req.mfargs.module.into(),
                 req.mfargs.function.into(),
                 req.mfargs.args.into(),
             ]),
         );
         self.msg_tx.send(spawn_request).await?;
-        self.ongoing_reqs.insert(res_id.id.clone(), req.reply_tx);
-        // Res = make_ref(),
-        // ReqId = spawn_request(N, ?MODULE, execute_call, [Res, M, F, A],
-        //                       [{reply, error_only}, monitor]),
-        // receive
-        // {spawn_reply, ReqId, error, Reason} ->
-        //     result(spawn_reply, ReqId, Res, Reason);
-        // {'DOWN', ReqId, process, _Pid, Reason} ->
-        //     result(down, ReqId, Res, Reason)
-        //     after T ->
-        //     result(timeout, ReqId, Res, undefined)
-        //     end;
+        self.ongoing_reqs.insert(req_id, req.reply_tx);
         Ok(())
     }
 
     async fn handle_msg(&mut self, msg: Message) -> Result<(), RunError> {
-        dbg!(msg);
-        todo!()
+        match msg {
+            Message::Tick => Ok(()),
+            Message::SpawnReply(msg) => self.handle_spawn_reply(msg).await,
+            Message::MonitorPExit(msg) => self.handle_monitor_p_exit(msg).await,
+            _ => Err(RunError::UnexpectedMessage { message: msg }),
+        }
+    }
+
+    async fn handle_spawn_reply(&mut self, msg: message::SpawnReply) -> Result<(), RunError> {
+        if let PidOrAtom::Atom(reason) = msg.result {
+            Err(RunError::SpawnRequestError {
+                reason: reason.name,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn handle_monitor_p_exit(&mut self, msg: message::MonitorPExit) -> Result<(), RunError> {
+        if let Some(reply_tx) = self.ongoing_reqs.remove(&msg.reference) {
+            let _ = reply_tx.send(msg.reason);
+            Ok(())
+        } else {
+            Err(RunError::UnexpectedResponse { message: msg })
+        }
     }
 
     fn node(&self) -> Atom {
@@ -209,17 +218,25 @@ impl RpcClient {
     }
 
     fn make_ref(&self) -> Reference {
-        // TDOO:
         Reference {
             node: self.node(),
-            id: vec![0, rand::random(), rand::random()], //vec![rand::random(), rand::random(), rand::random()],
-            creation: 0,                                 // self.local_node.creation.get() as u8,
+            id: vec![rand::random(), rand::random(), rand::random()],
+            creation: self.local_node.creation.get(),
         }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    #[error("failed to execute `spawn_request` on the target node: {reason}")]
+    SpawnRequestError { reason: String },
+
+    #[error("received an unexpected message: {message:?}")]
+    UnexpectedMessage { message: Message },
+
+    #[error("received an RPC response without associating request: {message:?}")]
+    UnexpectedResponse { message: message::MonitorPExit },
+
     #[error(transparent)]
     MessageSendError(#[from] erl_dist::message::SendError),
 
@@ -247,7 +264,7 @@ impl RpcClientHandle {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = Request { mfargs, reply_tx };
-        if let Err(e) = self.req_tx.try_send(req) {
+        let res = if let Err(e) = self.req_tx.try_send(req) {
             if e.is_disconnected() {
                 return Err(CallError::Terminated);
             } else {
@@ -255,8 +272,25 @@ impl RpcClientHandle {
                 return Err(CallError::Full);
             }
         } else {
-            let term = reply_rx.await.map_err(|_| CallError::Terminated)?;
-            Ok(term)
+            reply_rx.await.map_err(|_| CallError::Terminated)?
+        };
+        if let Term::Tuple(mut res) = res {
+            let mut ok = false;
+            if res.elements.len() == 3 {
+                if let Term::Atom(kind) = &res.elements[1] {
+                    if kind.name == "return" {
+                        ok = true;
+                    }
+                }
+            }
+            if ok {
+                let value = std::mem::replace(&mut res.elements[2], List::nil().into());
+                Ok(value)
+            } else {
+                Err(CallError::ErrorResponse { reason: res.into() })
+            }
+        } else {
+            Err(CallError::ErrorResponse { reason: res })
         }
     }
 }

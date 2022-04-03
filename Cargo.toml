@@ -16,6 +16,3 @@ thiserror = "1"
 anyhow = "1"
 clap = { version = "3", features = ["derive"] }
 dirs = "4"
-
-[patch.'crates-io']
-erl_dist = {path = "../erl_dist/"}
