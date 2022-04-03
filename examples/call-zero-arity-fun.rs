@@ -4,6 +4,8 @@ use erl_dist::term::{Atom, List};
 #[derive(Debug, Parser)]
 struct Args {
     node_name: erl_dist::node::NodeName,
+    module: String,
+    function: String,
 
     #[clap(long)]
     cookie: Option<String>,
@@ -30,13 +32,9 @@ fn main() -> anyhow::Result<()> {
         .detach();
 
         let result = handle
-            .call(
-                "erlang".into(),
-                "system_info".into(),
-                List::from(vec![Atom::from("otp_release").into()]),
-            )
+            .call(args.module.into(), args.function.into(), List::nil())
             .await?;
-        eprintln!("Result: {:?}", result);
+        println!("{}", result);
 
         Ok(())
     })
