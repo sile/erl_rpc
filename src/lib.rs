@@ -95,7 +95,7 @@ impl RpcClient {
                 ongoing_reqs: HashMap::new(),
             })
         } else {
-            return Err(ConnectError::UnexpectedHandshakeStatus { status });
+            Err(ConnectError::UnexpectedHandshakeStatus { status })
         }
     }
 
