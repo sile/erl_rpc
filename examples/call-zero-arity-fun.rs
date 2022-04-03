@@ -1,5 +1,5 @@
 use clap::Parser;
-use erl_dist::term::{Atom, List};
+use erl_dist::term::List;
 
 #[derive(Debug, Parser)]
 struct Args {

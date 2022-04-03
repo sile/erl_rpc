@@ -365,3 +365,81 @@ async fn get_node_entry(node_name: &NodeName) -> Result<NodeEntry, ConnectError>
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Child, Command};
+
+    const COOKIE: &str = "test-cookie";
+
+    #[derive(Debug)]
+    struct TestErlangNode {
+        child: Child,
+    }
+
+    impl TestErlangNode {
+        async fn new(name: &str) -> anyhow::Result<Self> {
+            let child = Command::new("erl")
+                .args(&["-sname", name, "-noshell", "-setcookie", COOKIE])
+                .spawn()?;
+            let start = std::time::Instant::now();
+            loop {
+                if let Ok(client) = try_epmd_client().await {
+                    if client.get_node(name).await?.is_some() {
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    break;
+                }
+            }
+            Ok(Self { child })
+        }
+    }
+
+    impl Drop for TestErlangNode {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+        }
+    }
+
+    async fn try_epmd_client() -> anyhow::Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>> {
+        let client =
+            smol::net::TcpStream::connect(("127.0.0.1", erl_dist::epmd::DEFAULT_EPMD_PORT))
+                .await
+                .map(erl_dist::epmd::EpmdClient::new)?;
+        Ok(client)
+    }
+
+    #[test]
+    fn it_works() {
+        smol::block_on(async {
+            let server = TestErlangNode::new("erl_rpc_test").await.unwrap();
+
+            let client = RpcClient::connect("erl_rpc_test@localhost", COOKIE)
+                .await
+                .unwrap();
+            let mut handle = client.handle();
+
+            smol::spawn(async {
+                if let Err(e) = client.run().await {
+                    eprintln!("RpcClient Error: {}", e);
+                }
+            })
+            .detach();
+
+            handle
+                .call(
+                    "erlang".into(),
+                    "processes".into(),
+                    erl_dist::term::List::nil(),
+                )
+                .await
+                .unwrap();
+
+            std::mem::drop(server);
+        });
+    }
+}
