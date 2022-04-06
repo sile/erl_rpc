@@ -338,6 +338,13 @@ impl RpcClientHandle {
             Err(CallError::ErrorResponse { reason: res })
         }
     }
+
+    /// Terminates the execution of [`RpcClient`].
+    ///
+    /// After this call, the future returned from [`RpcClient::run()`] will finish immediately.
+    pub fn terminate(&mut self) {
+        self.req_tx.close_channel();
+    }
 }
 
 #[derive(Debug)]
