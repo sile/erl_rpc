@@ -32,12 +32,30 @@ use erl_dist::epmd::{EpmdClient, NodeEntry};
 use erl_dist::handshake::{ClientSideHandshake, HandshakeStatus};
 use erl_dist::message::{self, Message};
 use erl_dist::node::{Creation, LocalNode, NodeName, PeerNode};
-use erl_dist::term::{Atom, FixInteger, List, Mfa, Pid, PidOrAtom, Reference, Term};
+use erl_dist::term::{Atom, FixInteger, List, Mfa, Pid, PidOrAtom, Reference, Term, Tuple};
 use erl_dist::DistributionFlags;
 use futures::channel::{mpsc, oneshot};
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use smol::net::TcpStream;
 use std::collections::HashMap;
+
+/// TODO
+#[derive(Debug)]
+pub struct GroupLeader {
+    io_request_rx: mpsc::UnboundedReceiver<IoRequest>,
+}
+
+impl GroupLeader {
+    fn new() -> (Self, mpsc::UnboundedSender<IoRequest>) {
+        let (tx, rx) = mpsc::unbounded();
+        (Self { io_request_rx: rx }, tx)
+    }
+
+    /// TODO
+    pub async fn recv(&mut self) -> Option<IoRequest> {
+        self.io_request_rx.next().await
+    }
+}
 
 /// Possible errors during [`RpcClient::connect`].
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +111,8 @@ pub struct RpcClient {
     local_node: LocalNode,
     peer_node: PeerNode,
     ongoing_reqs: HashMap<Reference, oneshot::Sender<Term>>,
+    group_leader: Option<GroupLeader>,
+    io_request_tx: mpsc::UnboundedSender<IoRequest>,
 }
 
 impl RpcClient {
@@ -104,7 +124,7 @@ impl RpcClient {
             return Err(ConnectError::TooOldDistributionProtocolVersion);
         }
 
-        let tentative_name = "nonode@localhost";
+        let tentative_name = server_node_name.to_string(); // TODO "nonode@localhost";
         let mut local_node = LocalNode::new(tentative_name.parse()?, Creation::random());
         local_node.flags |= DistributionFlags::NAME_ME;
         local_node.flags |= DistributionFlags::SPAWN;
@@ -121,6 +141,7 @@ impl RpcClient {
             let (connection, peer_node) = handshake.execute_rest(true).await?;
             let (msg_tx, msg_rx) = message::channel(connection, local_node.flags & peer_node.flags);
             let (req_tx, req_rx) = mpsc::channel(1024); // TODO: Remove hard-coding
+            let (group_leader, io_request_tx) = GroupLeader::new();
             Ok(Self {
                 msg_tx,
                 msg_rx: Some(msg_rx),
@@ -129,6 +150,8 @@ impl RpcClient {
                 local_node,
                 peer_node,
                 ongoing_reqs: HashMap::new(),
+                group_leader: Some(group_leader),
+                io_request_tx,
             })
         } else {
             Err(ConnectError::UnexpectedHandshakeStatus { status })
@@ -140,6 +163,11 @@ impl RpcClient {
         RpcClientHandle {
             req_tx: self.req_tx.clone().take().expect("unreachable"),
         }
+    }
+
+    /// TODO.
+    pub fn take_group_leader(&mut self) -> Option<GroupLeader> {
+        self.group_leader.take()
     }
 
     /// Returns the local node information.
@@ -154,6 +182,7 @@ impl RpcClient {
 
     /// Runs a loop to handle RPC.
     pub async fn run(mut self) -> Result<(), RunError> {
+        self.group_leader = None;
         self.req_tx = None;
 
         let msg_rx = self.msg_rx.take().expect("unreachable");
@@ -226,8 +255,119 @@ impl RpcClient {
             Message::Tick => Ok(()),
             Message::SpawnReply(msg) => self.handle_spawn_reply(msg).await,
             Message::MonitorPExit(msg) => self.handle_monitor_p_exit(msg).await,
+            Message::MonitorP(msg) => self.handle_monitor_p(msg).await,
+            Message::Send(msg) => self.handle_send(msg).await,
             _ => Err(RunError::UnexpectedMessage { message: msg }),
         }
+    }
+
+    async fn handle_send(&mut self, mut msg: message::Send) -> Result<(), RunError> {
+        if self.pid() != msg.to_pid {
+            return Ok(());
+        }
+
+        if let Term::Tuple(tuple) = &mut msg.message {
+            if tuple.elements.len() == 4 {
+                if let (Term::Atom(tag), Term::Pid(from)) = (&tuple.elements[0], &tuple.elements[1])
+                {
+                    if tag.name == "io_request" {
+                        return self
+                            .handle_io_request(
+                                from.clone(),
+                                std::mem::replace(&mut tuple.elements[2], List::nil().into()),
+                                std::mem::replace(&mut tuple.elements[3], List::nil().into()),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_io_request(
+        &mut self,
+        from: Pid,
+        reply_as: Term,
+        request: Term,
+    ) -> Result<(), RunError> {
+        let mut tuple: Tuple = request.try_into().map_err(|e| RunError::IoRequestError {
+            reason: format!("expected a tuple, but got {e}"),
+        })?;
+        if !(tuple.elements.len() == 3 || tuple.elements.len() == 5) {
+            return Err(RunError::IoRequestError {
+                reason: format!("too small or large request tuple: {tuple}"),
+            });
+        }
+        let tag: Atom = std::mem::replace(&mut tuple.elements[0], List::nil().into())
+            .try_into()
+            .map_err(|e| RunError::IoRequestError {
+                reason: format!("expected the 'put_chars' atom, but got {e}"),
+            })?;
+        if tag.name != "put_chars" {
+            return Err(RunError::IoRequestError {
+                reason: format!("expected the 'put_chars' atom, but got {tag}"),
+            });
+        }
+        let encoding: Atom = std::mem::replace(&mut tuple.elements[1], List::nil().into())
+            .try_into()
+            .map_err(|e| RunError::IoRequestError {
+                reason: format!("expected an atom, but got {e}"),
+            })?;
+        let req = match tuple.elements.len() {
+            3 => IoRequest::PutChars {
+                encoding,
+                chars: std::mem::replace(&mut tuple.elements[2], List::nil().into()),
+            },
+            5 => IoRequest::PutMFArgs {
+                encoding,
+                mfargs: MFArgs {
+                    module: std::mem::replace(&mut tuple.elements[2], List::nil().into())
+                        .try_into()
+                        .map_err(|e| RunError::IoRequestError {
+                            reason: format!("expected an atom, but got {e}"),
+                        })?,
+                    function: std::mem::replace(&mut tuple.elements[3], List::nil().into())
+                        .try_into()
+                        .map_err(|e| RunError::IoRequestError {
+                            reason: format!("expected an atom, but got {e}"),
+                        })?,
+                    args: std::mem::replace(&mut tuple.elements[3], List::nil().into())
+                        .try_into()
+                        .map_err(|e| RunError::IoRequestError {
+                            reason: format!("expected a list, but got {e}"),
+                        })?,
+                },
+            },
+            _ => unreachable!(),
+        };
+        let _ = self.io_request_tx.unbounded_send(req);
+
+        let reply = message::Message::send(
+            from,
+            Tuple::from(vec![
+                Atom::from("io_reply").into(),
+                reply_as,
+                Atom::from("ok").into(),
+            ])
+            .into(),
+        );
+        self.msg_tx.send(reply).await?;
+        Ok(())
+    }
+
+    async fn handle_monitor_p(&mut self, msg: message::MonitorP) -> Result<(), RunError> {
+        if PidOrAtom::Pid(self.pid()) != msg.to_proc {
+            let monitor_p_exit = message::Message::monitor_p_exit(
+                msg.from_pid,
+                msg.to_proc,
+                msg.reference,
+                Atom::from("noproc").into(),
+            );
+            self.msg_tx.send(monitor_p_exit).await?;
+        }
+        Ok(())
     }
 
     async fn handle_spawn_reply(&mut self, msg: message::SpawnReply) -> Result<(), RunError> {
@@ -266,6 +406,16 @@ impl RpcClient {
     }
 }
 
+/// TODO.
+#[derive(Debug, Clone)]
+#[allow(missing_docs)]
+pub enum IoRequest {
+    /// TODO.
+    PutChars { encoding: Atom, chars: Term },
+    /// TODO.
+    PutMFArgs { encoding: Atom, mfargs: MFArgs },
+}
+
 /// Pissible errors during [`RpcClient::run()`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -279,6 +429,9 @@ pub enum RunError {
 
     #[error("received an RPC response without associating request: {message:?}")]
     UnexpectedResponse { message: message::MonitorPExit },
+
+    #[error("failed to handle an I/O request: {reason}")]
+    IoRequestError { reason: String },
 
     #[error(transparent)]
     MessageSendError(#[from] erl_dist::message::SendError),
@@ -339,6 +492,39 @@ impl RpcClientHandle {
         }
     }
 
+    /// RPC call for 0-arity functions.
+    pub async fn call0(&mut self, module: &str, function: &str) -> Result<Term, CallError> {
+        self.call(module.into(), function.into(), List::nil().into())
+            .await
+    }
+
+    /// RPC call for 1-arity functions.
+    pub async fn call1(
+        &mut self,
+        module: &str,
+        function: &str,
+        arg: impl Into<Term>,
+    ) -> Result<Term, CallError> {
+        self.call(module.into(), function.into(), List::from(vec![arg.into()]))
+            .await
+    }
+
+    /// RPC call for 2-arity functions.
+    pub async fn call2(
+        &mut self,
+        module: &str,
+        function: &str,
+        arg0: impl Into<Term>,
+        arg1: impl Into<Term>,
+    ) -> Result<Term, CallError> {
+        self.call(
+            module.into(),
+            function.into(),
+            List::from(vec![arg0.into(), arg1.into()]),
+        )
+        .await
+    }
+
     /// Terminates the execution of [`RpcClient`].
     ///
     /// After this call, the future returned from [`RpcClient::run()`] will finish immediately.
@@ -347,11 +533,17 @@ impl RpcClientHandle {
     }
 }
 
-#[derive(Debug)]
-struct MFArgs {
-    module: Atom,
-    function: Atom,
-    args: List,
+/// Module, Function, Arguments.
+#[derive(Debug, Clone)]
+pub struct MFArgs {
+    /// Module.
+    pub module: Atom,
+
+    /// Function.
+    pub function: Atom,
+
+    /// Arguments.
+    pub args: List,
 }
 
 #[derive(Debug)]
@@ -370,6 +562,93 @@ async fn get_node_entry(node_name: &NodeName) -> Result<NodeEntry, ConnectError>
         Err(ConnectError::NodeNodeFound {
             name: node_name.clone(),
         })
+    }
+}
+
+/// TODO: s/enum/struct/
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConvertError {
+    #[error("expected {expected}, but got {actual}")]
+    #[allow(missing_docs)]
+    UnexpectedType { expected: String, actual: Term },
+}
+
+/// TODO
+pub trait ConvertTerm: Sized {
+    /// TODO
+    fn try_into_result(self) -> Result<Result<Term, Term>, ConvertError>;
+    /// TODO
+    fn try_into_pid(self) -> Result<Pid, ConvertError>;
+    /// TODO
+    fn try_into_atom(self) -> Result<Atom, ConvertError>;
+    /// TODO
+    fn expect_atom(self, value: &str) -> Result<(), ConvertError>;
+}
+
+impl ConvertTerm for Term {
+    fn expect_atom(self, value: &str) -> Result<(), ConvertError> {
+        let atom: Atom = self
+            .try_into()
+            .map_err(|actual| ConvertError::UnexpectedType {
+                expected: format!("'{}'", value),
+                actual,
+            })?;
+        if atom.name == value {
+            Ok(())
+        } else {
+            Err(ConvertError::UnexpectedType {
+                expected: format!("'{}'", value),
+                actual: atom.into(),
+            })
+        }
+    }
+
+    fn try_into_result(self) -> Result<Result<Term, Term>, ConvertError> {
+        let mut tuple: Tuple = self
+            .try_into()
+            .map_err(|actual| ConvertError::UnexpectedType {
+                expected: "a tuple".to_owned(),
+                actual,
+            })?;
+        if tuple.elements.len() != 2 {
+            return Err(ConvertError::UnexpectedType {
+                expected: "a tuple with 2 elements".to_owned(),
+                actual: tuple.into(),
+            });
+        }
+
+        let tag: Atom = std::mem::replace(&mut tuple.elements[0], List::nil().into())
+            .try_into()
+            .map_err(|actual| ConvertError::UnexpectedType {
+                expected: "an atom ('ok' or 'error')".to_owned(),
+                actual,
+            })?;
+        let value = std::mem::replace(&mut tuple.elements[1], List::nil().into());
+        match tag.name.as_str() {
+            "ok" => Ok(Ok(value)),
+            "error" => Ok(Err(value)),
+            _ => Err(ConvertError::UnexpectedType {
+                expected: "'ok' or 'error'".to_owned(),
+                actual: tag.into(),
+            }),
+        }
+    }
+
+    fn try_into_pid(self) -> Result<Pid, ConvertError> {
+        self.try_into()
+            .map_err(|actual| ConvertError::UnexpectedType {
+                expected: "a pid".to_owned(),
+                actual,
+            })
+    }
+
+    fn try_into_atom(self) -> Result<Atom, ConvertError> {
+        self.try_into()
+            .map_err(|actual| ConvertError::UnexpectedType {
+                expected: "an atom".to_owned(),
+                actual,
+            })
     }
 }
 
