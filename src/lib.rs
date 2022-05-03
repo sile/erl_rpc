@@ -35,7 +35,8 @@ use erl_dist::node::{Creation, LocalNode, NodeName, PeerNode};
 use erl_dist::term::{Atom, FixInteger, List, Mfa, Pid, PidOrAtom, Reference, Term};
 use erl_dist::DistributionFlags;
 use futures::channel::{mpsc, oneshot};
-use futures::FutureExt;
+use futures::future::Either;
+use futures::{FutureExt, StreamExt};
 use smol::net::TcpStream;
 use std::collections::HashMap;
 
@@ -88,7 +89,7 @@ pub enum CallError {
 pub struct RpcClient {
     msg_rx: Option<message::Receiver<TcpStream>>,
     msg_tx: message::Sender<TcpStream>,
-    req_rx: mpsc::Receiver<Request>,
+    req_rx: Option<mpsc::Receiver<Request>>,
     req_tx: Option<mpsc::Sender<Request>>,
     local_node: LocalNode,
     peer_node: PeerNode,
@@ -124,7 +125,7 @@ impl RpcClient {
             Ok(Self {
                 msg_tx,
                 msg_rx: Some(msg_rx),
-                req_rx,
+                req_rx: Some(req_rx),
                 req_tx: Some(req_tx),
                 local_node,
                 peer_node,
@@ -156,43 +157,46 @@ impl RpcClient {
     pub async fn run(mut self) -> Result<(), RunError> {
         self.req_tx = None;
 
+        let req_rx = self.req_rx.take().expect("unreachable");
+        let mut req_rx_fut = req_rx.into_future();
+
         let msg_rx = self.msg_rx.take().expect("unreachable");
         let mut msg_rx_fut = msg_rx.recv_owned().boxed();
 
         let tick_interval = std::time::Duration::from_secs(30);
         let mut tick_timer = smol::Timer::after(tick_interval);
 
+        let mut select = futures::future::select(tick_timer, msg_rx_fut);
         loop {
-            if smol::future::poll_once(&mut tick_timer).await.is_some() {
-                self.msg_tx.send(Message::Tick).await?;
-                tick_timer.set_after(tick_interval);
-            }
+            match futures::future::select(select, req_rx_fut).await {
+                Either::Left((Either::Left((_, msg_rx_fut0)), req_rx_fut0)) => {
+                    self.msg_tx.send(Message::Tick).await?;
 
-            match smol::future::poll_once(&mut msg_rx_fut).await {
-                Some(Ok((msg, msg_rx))) => {
-                    msg_rx_fut = msg_rx.recv_owned().boxed();
+                    req_rx_fut = req_rx_fut0;
+                    msg_rx_fut = msg_rx_fut0;
+                    tick_timer = smol::Timer::after(tick_interval);
+                    select = futures::future::select(tick_timer, msg_rx_fut);
+                }
+                Either::Left((Either::Right((result, tick_timer0)), req_rx_fut0)) => {
+                    let (msg, msg_rx) = result?;
                     self.handle_msg(msg).await?;
-                    continue;
-                }
-                Some(Err(e)) => {
-                    return Err(e.into());
-                }
-                None => {}
-            }
 
-            match self.req_rx.try_next() {
-                Ok(Some(req)) => {
-                    self.handle_req(req).await?;
-                    continue;
+                    req_rx_fut = req_rx_fut0;
+                    msg_rx_fut = msg_rx.recv_owned().boxed();
+                    tick_timer = tick_timer0;
+                    select = futures::future::select(tick_timer, msg_rx_fut);
                 }
-                Ok(None) => {
-                    break;
-                }
-                Err(_) => {}
-            }
+                Either::Right(((req, req_rx), select0)) => {
+                    if let Some(req) = req {
+                        self.handle_req(req).await?;
+                    } else {
+                        break;
+                    }
 
-            let sleep_duration = std::time::Duration::from_millis(1);
-            smol::Timer::after(sleep_duration).await;
+                    req_rx_fut = req_rx.into_future();
+                    select = select0;
+                }
+            }
         }
         Ok(())
     }
