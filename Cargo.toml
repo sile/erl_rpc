@@ -15,7 +15,7 @@ readme = "README.md"
 coveralls = { repository = "sile/erl_rpc" }
 
 [dependencies]
-erl_dist = "0.5"
+erl_dist = "0.6"
 futures = "0.3"
 rand = "0.8"
 smol = "1"
@@ -23,5 +23,5 @@ thiserror = "1"
 
 [dev-dependencies]
 anyhow = "1"
-clap = { version = "3", features = ["derive"] }
-dirs = "4"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
