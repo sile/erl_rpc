@@ -40,7 +40,7 @@ jobs:
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: ${{matrix.otp}}
+          otp-version: 26.0
 
       - name: Install ${{ matrix.toolchain }} toolchain
         uses: actions-rs/toolchain@v1
@@ -95,7 +95,7 @@ jobs:
         
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: ${{matrix.otp}}
+          otp-version: 26.0
 
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
