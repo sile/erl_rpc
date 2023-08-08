@@ -50,6 +50,8 @@ jobs:
         with:
           command: test
           args: --all
+        env:
+          RUST_BACKTRACE: 1
 
   lints:
     name: Lints
