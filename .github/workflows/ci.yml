@@ -38,6 +38,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v2
 
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.otp}}
+
       - name: Install ${{ matrix.toolchain }} toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -88,6 +92,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+        
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.otp}}
 
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
