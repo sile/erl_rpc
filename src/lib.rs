@@ -99,12 +99,22 @@ pub struct RpcClient {
 impl RpcClient {
     /// Connects to a given Erlang node.
     pub async fn connect(server_node_name: &str, cookie: &str) -> Result<Self, ConnectError> {
-        let server_node_name: NodeName = server_node_name.parse()?;
-        let server_node_entry = get_node_entry(&server_node_name).await?;
+        let server_node_entry = get_node_entry(&server_node_name.parse()?).await?;
         if server_node_entry.highest_version < 6 {
             return Err(ConnectError::TooOldDistributionProtocolVersion);
         }
 
+        Self::connect_with_port(server_node_name, server_node_entry.port, cookie).await
+    }
+
+    /// Directly connects to a given Erlang node without using EPMD.
+    ///
+    pub async fn connect_with_port(
+        server_node_name: &str,
+        server_listen_port: u16,
+        cookie: &str,
+    ) -> Result<Self, ConnectError> {
+        let server_node_name: NodeName = server_node_name.parse()?;
         let tentative_name = "nonode@localhost";
         let mut local_node = LocalNode::new(tentative_name.parse()?, Creation::random());
         local_node.flags |= DistributionFlags::NAME_ME;
@@ -112,8 +122,7 @@ impl RpcClient {
         local_node.flags |= DistributionFlags::DIST_MONITOR;
         local_node.flags |= DistributionFlags::DIST_MONITOR_NAME;
 
-        let connection =
-            TcpStream::connect((server_node_name.host(), server_node_entry.port)).await?;
+        let connection = TcpStream::connect((server_node_name.host(), server_listen_port)).await?;
         let mut handshake = ClientSideHandshake::new(connection, local_node.clone(), cookie);
         let status = handshake.execute_send_name(6).await?;
         if let HandshakeStatus::Named { name, creation } = status {
