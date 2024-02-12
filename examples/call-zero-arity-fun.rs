@@ -9,6 +9,9 @@ struct Args {
 
     #[clap(long)]
     cookie: Option<String>,
+
+    #[clap(long, short)]
+    port: Option<u16>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -22,7 +25,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     smol::block_on(async {
-        let client = erl_rpc::RpcClient::connect(&args.node_name.to_string(), &cookie).await?;
+        let client = if let Some(port) = args.port {
+            erl_rpc::RpcClient::connect_with_port(&args.node_name.to_string(), port, &cookie)
+                .await?
+        } else {
+            erl_rpc::RpcClient::connect(&args.node_name.to_string(), &cookie).await?
+        };
         let mut handle = client.handle();
         smol::spawn(async {
             if let Err(e) = client.run().await {
