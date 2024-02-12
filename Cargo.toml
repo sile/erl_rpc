@@ -18,7 +18,7 @@ coveralls = { repository = "sile/erl_rpc" }
 erl_dist = "0.6"
 futures = "0.3"
 rand = "0.8"
-smol = "1"
+smol = "2"
 thiserror = "1"
 
 [dev-dependencies]
