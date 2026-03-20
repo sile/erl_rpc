@@ -10,11 +10,6 @@ homepage = "https://github.com/sile/erl_rpc"
 repository = "https://github.com/sile/erl_rpc"
 readme = "README.md"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[badges]
-coveralls = { repository = "sile/erl_rpc" }
-
 [dependencies]
 erl_dist = "0.8"
 futures = "0.3"
