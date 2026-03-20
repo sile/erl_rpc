@@ -81,16 +81,24 @@ impl std::error::Error for ConnectError {
 }
 
 impl From<erl_dist::node::NodeNameError> for ConnectError {
-    fn from(e: erl_dist::node::NodeNameError) -> Self { Self::NodeNameError(e) }
+    fn from(e: erl_dist::node::NodeNameError) -> Self {
+        Self::NodeNameError(e)
+    }
 }
 impl From<erl_dist::epmd::EpmdError> for ConnectError {
-    fn from(e: erl_dist::epmd::EpmdError) -> Self { Self::EpmdError(e) }
+    fn from(e: erl_dist::epmd::EpmdError) -> Self {
+        Self::EpmdError(e)
+    }
 }
 impl From<erl_dist::handshake::HandshakeError> for ConnectError {
-    fn from(e: erl_dist::handshake::HandshakeError) -> Self { Self::HandshakeError(e) }
+    fn from(e: erl_dist::handshake::HandshakeError) -> Self {
+        Self::HandshakeError(e)
+    }
 }
 impl From<std::io::Error> for ConnectError {
-    fn from(e: std::io::Error) -> Self { Self::IoError(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::IoError(e)
+    }
 }
 
 /// Possible errors during [`RpcClientHandle::call`].
@@ -179,7 +187,7 @@ impl RpcClient {
     /// Returns a handle of this client to request RPCs.
     pub fn handle(&self) -> RpcClientHandle {
         RpcClientHandle {
-            req_tx: self.req_tx.clone().take().expect("unreachable"),
+            req_tx: self.req_tx.clone().expect("unreachable"),
         }
     }
 
@@ -325,9 +333,17 @@ pub enum RunError {
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SpawnRequestError { reason } => write!(f, "failed to execute `spawn_request` on the target node: {reason}"),
-            Self::UnexpectedMessage { message } => write!(f, "received an unexpected message: {message:?}"),
-            Self::UnexpectedResponse { message } => write!(f, "received an RPC response without associating request: {message:?}"),
+            Self::SpawnRequestError { reason } => write!(
+                f,
+                "failed to execute `spawn_request` on the target node: {reason}"
+            ),
+            Self::UnexpectedMessage { message } => {
+                write!(f, "received an unexpected message: {message:?}")
+            }
+            Self::UnexpectedResponse { message } => write!(
+                f,
+                "received an RPC response without associating request: {message:?}"
+            ),
             Self::MessageSendError(e) => write!(f, "{e}"),
             Self::MessageRecvError(e) => write!(f, "{e}"),
         }
@@ -345,10 +361,14 @@ impl std::error::Error for RunError {
 }
 
 impl From<erl_dist::message::SendError> for RunError {
-    fn from(e: erl_dist::message::SendError) -> Self { Self::MessageSendError(e) }
+    fn from(e: erl_dist::message::SendError) -> Self {
+        Self::MessageSendError(e)
+    }
 }
 impl From<erl_dist::message::RecvError> for RunError {
-    fn from(e: erl_dist::message::RecvError) -> Self { Self::MessageRecvError(e) }
+    fn from(e: erl_dist::message::RecvError) -> Self {
+        Self::MessageRecvError(e)
+    }
 }
 
 /// Handle of [`RpcClient`].
@@ -476,7 +496,8 @@ mod tests {
         }
     }
 
-    async fn try_epmd_client() -> Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>, Box<dyn std::error::Error>> {
+    async fn try_epmd_client(
+    ) -> Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>, Box<dyn std::error::Error>> {
         let client =
             smol::net::TcpStream::connect(("127.0.0.1", erl_dist::epmd::DEFAULT_EPMD_PORT))
                 .await
