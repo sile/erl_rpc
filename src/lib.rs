@@ -3,7 +3,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! # fn main() -> anyhow::Result<()> {
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! smol::block_on(async {
 //!     // Connect to an Erlang node.
 //!     let erlang_node = "foo@localhost";
@@ -450,7 +450,7 @@ mod tests {
     }
 
     impl TestErlangNode {
-        async fn new(name: &str) -> anyhow::Result<Self> {
+        async fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
             let child = Command::new("erl")
                 .args(&["-sname", name, "-noshell", "-setcookie", COOKIE])
                 .spawn()?;
@@ -476,7 +476,7 @@ mod tests {
         }
     }
 
-    async fn try_epmd_client() -> anyhow::Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>> {
+    async fn try_epmd_client() -> Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>, Box<dyn std::error::Error>> {
         let client =
             smol::net::TcpStream::connect(("127.0.0.1", erl_dist::epmd::DEFAULT_EPMD_PORT))
                 .await

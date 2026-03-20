@@ -14,14 +14,14 @@ struct Args {
     port: Option<u16>,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let cookie = if let Some(cookie) = &args.cookie {
         cookie.clone()
     } else if let Some(dir) = dirs::home_dir().filter(|dir| dir.join(".erlang.cookie").exists()) {
         std::fs::read_to_string(dir.join(".erlang.cookie"))?
     } else {
-        anyhow::bail!("Could not find the cookie file $HOME/.erlang.cookie. Please specify `-cookie` arg instead.");
+        return Err("Could not find the cookie file $HOME/.erlang.cookie. Please specify `-cookie` arg instead.".into());
     };
 
     smol::block_on(async {
