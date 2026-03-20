@@ -3,7 +3,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! # fn main() -> anyhow::Result<()> {
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! smol::block_on(async {
 //!     // Connect to an Erlang node.
 //!     let erlang_node = "foo@localhost";
@@ -41,48 +41,87 @@ use smol::net::TcpStream;
 use std::collections::HashMap;
 
 /// Possible errors during [`RpcClient::connect`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[allow(missing_docs)]
 pub enum ConnectError {
-    #[error(
-        "the server only supports the distribution protocol version 5 while the client requires 6"
-    )]
     TooOldDistributionProtocolVersion,
-
-    #[error("unexpected handshake status: {status:?}")]
     UnexpectedHandshakeStatus { status: HandshakeStatus },
-
-    #[error("no such Erlang node: {name}")]
     NodeNodeFound { name: NodeName },
+    NodeNameError(erl_dist::node::NodeNameError),
+    EpmdError(erl_dist::epmd::EpmdError),
+    HandshakeError(erl_dist::handshake::HandshakeError),
+    IoError(std::io::Error),
+}
 
-    #[error(transparent)]
-    NodeNameError(#[from] erl_dist::node::NodeNameError),
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooOldDistributionProtocolVersion => write!(f, "the server only supports the distribution protocol version 5 while the client requires 6"),
+            Self::UnexpectedHandshakeStatus { status } => write!(f, "unexpected handshake status: {status:?}"),
+            Self::NodeNodeFound { name } => write!(f, "no such Erlang node: {name}"),
+            Self::NodeNameError(e) => write!(f, "{e}"),
+            Self::EpmdError(e) => write!(f, "{e}"),
+            Self::HandshakeError(e) => write!(f, "{e}"),
+            Self::IoError(e) => write!(f, "{e}"),
+        }
+    }
+}
 
-    #[error(transparent)]
-    EpmdError(#[from] erl_dist::epmd::EpmdError),
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NodeNameError(e) => Some(e),
+            Self::EpmdError(e) => Some(e),
+            Self::HandshakeError(e) => Some(e),
+            Self::IoError(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
-    #[error(transparent)]
-    HandshakeError(#[from] erl_dist::handshake::HandshakeError),
-
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
+impl From<erl_dist::node::NodeNameError> for ConnectError {
+    fn from(e: erl_dist::node::NodeNameError) -> Self {
+        Self::NodeNameError(e)
+    }
+}
+impl From<erl_dist::epmd::EpmdError> for ConnectError {
+    fn from(e: erl_dist::epmd::EpmdError) -> Self {
+        Self::EpmdError(e)
+    }
+}
+impl From<erl_dist::handshake::HandshakeError> for ConnectError {
+    fn from(e: erl_dist::handshake::HandshakeError) -> Self {
+        Self::HandshakeError(e)
+    }
+}
+impl From<std::io::Error> for ConnectError {
+    fn from(e: std::io::Error) -> Self {
+        Self::IoError(e)
+    }
 }
 
 /// Possible errors during [`RpcClientHandle::call`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 #[allow(missing_docs)]
 pub enum CallError {
-    #[error("received an error response: {reason}")]
     ErrorResponse { reason: Term },
-
-    #[error("send buffer is full")]
     Full,
-
-    #[error("RpcClient has been terminated")]
     Terminated,
 }
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ErrorResponse { reason } => write!(f, "received an error response: {reason}"),
+            Self::Full => write!(f, "send buffer is full"),
+            Self::Terminated => write!(f, "RpcClient has been terminated"),
+        }
+    }
+}
+
+impl std::error::Error for CallError {}
 
 /// RPC client.
 #[derive(Debug)]
@@ -148,7 +187,7 @@ impl RpcClient {
     /// Returns a handle of this client to request RPCs.
     pub fn handle(&self) -> RpcClientHandle {
         RpcClientHandle {
-            req_tx: self.req_tx.clone().take().expect("unreachable"),
+            req_tx: self.req_tx.clone().expect("unreachable"),
         }
     }
 
@@ -279,25 +318,57 @@ impl RpcClient {
     }
 }
 
-/// Pissible errors during [`RpcClient::run()`].
-#[derive(Debug, thiserror::Error)]
+/// Possible errors during [`RpcClient::run()`].
+#[derive(Debug)]
 #[non_exhaustive]
 #[allow(missing_docs)]
 pub enum RunError {
-    #[error("failed to execute `spawn_request` on the target node: {reason}")]
     SpawnRequestError { reason: String },
-
-    #[error("received an unexpected message: {message:?}")]
     UnexpectedMessage { message: Message },
-
-    #[error("received an RPC response without associating request: {message:?}")]
     UnexpectedResponse { message: message::MonitorPExit },
+    MessageSendError(erl_dist::message::SendError),
+    MessageRecvError(erl_dist::message::RecvError),
+}
 
-    #[error(transparent)]
-    MessageSendError(#[from] erl_dist::message::SendError),
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SpawnRequestError { reason } => write!(
+                f,
+                "failed to execute `spawn_request` on the target node: {reason}"
+            ),
+            Self::UnexpectedMessage { message } => {
+                write!(f, "received an unexpected message: {message:?}")
+            }
+            Self::UnexpectedResponse { message } => write!(
+                f,
+                "received an RPC response without associating request: {message:?}"
+            ),
+            Self::MessageSendError(e) => write!(f, "{e}"),
+            Self::MessageRecvError(e) => write!(f, "{e}"),
+        }
+    }
+}
 
-    #[error(transparent)]
-    MessageRecvError(#[from] erl_dist::message::RecvError),
+impl std::error::Error for RunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MessageSendError(e) => Some(e),
+            Self::MessageRecvError(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<erl_dist::message::SendError> for RunError {
+    fn from(e: erl_dist::message::SendError) -> Self {
+        Self::MessageSendError(e)
+    }
+}
+impl From<erl_dist::message::RecvError> for RunError {
+    fn from(e: erl_dist::message::RecvError) -> Self {
+        Self::MessageRecvError(e)
+    }
 }
 
 /// Handle of [`RpcClient`].
@@ -399,7 +470,7 @@ mod tests {
     }
 
     impl TestErlangNode {
-        async fn new(name: &str) -> anyhow::Result<Self> {
+        async fn new(name: &str) -> Result<Self, Box<dyn std::error::Error>> {
             let child = Command::new("erl")
                 .args(&["-sname", name, "-noshell", "-setcookie", COOKIE])
                 .spawn()?;
@@ -425,7 +496,8 @@ mod tests {
         }
     }
 
-    async fn try_epmd_client() -> anyhow::Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>> {
+    async fn try_epmd_client(
+    ) -> Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>, Box<dyn std::error::Error>> {
         let client =
             smol::net::TcpStream::connect(("127.0.0.1", erl_dist::epmd::DEFAULT_EPMD_PORT))
                 .await
