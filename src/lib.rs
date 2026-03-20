@@ -47,7 +47,7 @@ use std::collections::HashMap;
 pub enum ConnectError {
     TooOldDistributionProtocolVersion,
     UnexpectedHandshakeStatus { status: HandshakeStatus },
-    NodeNodeFound { name: NodeName },
+    NodeNotFound { name: NodeName },
     NodeNameError(erl_dist::node::NodeNameError),
     EpmdError(erl_dist::epmd::EpmdError),
     HandshakeError(erl_dist::handshake::HandshakeError),
@@ -59,7 +59,7 @@ impl std::fmt::Display for ConnectError {
         match self {
             Self::TooOldDistributionProtocolVersion => write!(f, "the server only supports the distribution protocol version 5 while the client requires 6"),
             Self::UnexpectedHandshakeStatus { status } => write!(f, "unexpected handshake status: {status:?}"),
-            Self::NodeNodeFound { name } => write!(f, "no such Erlang node: {name}"),
+            Self::NodeNotFound { name } => write!(f, "no such Erlang node: {name}"),
             Self::NodeNameError(e) => write!(f, "{e}"),
             Self::EpmdError(e) => write!(f, "{e}"),
             Self::HandshakeError(e) => write!(f, "{e}"),
@@ -451,7 +451,7 @@ async fn get_node_entry(node_name: &NodeName) -> Result<NodeEntry, ConnectError>
     if let Some(node) = client.get_node(node_name.name()).await? {
         Ok(node)
     } else {
-        Err(ConnectError::NodeNodeFound {
+        Err(ConnectError::NodeNotFound {
             name: node_name.clone(),
         })
     }
