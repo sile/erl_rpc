@@ -28,12 +28,12 @@
 //! # }
 //! ```
 #![warn(missing_docs)]
+use erl_dist::DistributionFlags;
 use erl_dist::epmd::{EpmdClient, NodeEntry};
 use erl_dist::handshake::{ClientSideHandshake, HandshakeStatus};
 use erl_dist::message::{self, Message};
 use erl_dist::node::{Creation, LocalNode, NodeName, PeerNode};
 use erl_dist::term::{Atom, FixInteger, List, Mfa, Pid, PidOrAtom, Reference, Term};
-use erl_dist::DistributionFlags;
 use futures::channel::{mpsc, oneshot};
 use futures::future::Either;
 use futures::{FutureExt, StreamExt};
@@ -47,7 +47,7 @@ use std::collections::HashMap;
 pub enum ConnectError {
     TooOldDistributionProtocolVersion,
     UnexpectedHandshakeStatus { status: HandshakeStatus },
-    NodeNodeFound { name: NodeName },
+    NodeNotFound { name: NodeName },
     NodeNameError(erl_dist::node::NodeNameError),
     EpmdError(erl_dist::epmd::EpmdError),
     HandshakeError(erl_dist::handshake::HandshakeError),
@@ -57,9 +57,14 @@ pub enum ConnectError {
 impl std::fmt::Display for ConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooOldDistributionProtocolVersion => write!(f, "the server only supports the distribution protocol version 5 while the client requires 6"),
-            Self::UnexpectedHandshakeStatus { status } => write!(f, "unexpected handshake status: {status:?}"),
-            Self::NodeNodeFound { name } => write!(f, "no such Erlang node: {name}"),
+            Self::TooOldDistributionProtocolVersion => write!(
+                f,
+                "the server only supports the distribution protocol version 5 while the client requires 6"
+            ),
+            Self::UnexpectedHandshakeStatus { status } => {
+                write!(f, "unexpected handshake status: {status:?}")
+            }
+            Self::NodeNotFound { name } => write!(f, "no such Erlang node: {name}"),
             Self::NodeNameError(e) => write!(f, "{e}"),
             Self::EpmdError(e) => write!(f, "{e}"),
             Self::HandshakeError(e) => write!(f, "{e}"),
@@ -451,7 +456,7 @@ async fn get_node_entry(node_name: &NodeName) -> Result<NodeEntry, ConnectError>
     if let Some(node) = client.get_node(node_name.name()).await? {
         Ok(node)
     } else {
-        Err(ConnectError::NodeNodeFound {
+        Err(ConnectError::NodeNotFound {
             name: node_name.clone(),
         })
     }
@@ -496,8 +501,8 @@ mod tests {
         }
     }
 
-    async fn try_epmd_client(
-    ) -> Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>, Box<dyn std::error::Error>> {
+    async fn try_epmd_client()
+    -> Result<erl_dist::epmd::EpmdClient<smol::net::TcpStream>, Box<dyn std::error::Error>> {
         let client =
             smol::net::TcpStream::connect(("127.0.0.1", erl_dist::epmd::DEFAULT_EPMD_PORT))
                 .await

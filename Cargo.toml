@@ -1,18 +1,14 @@
 [package]
 name = "erl_rpc"
 version = "0.3.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 authors = ["Takeru Ohta <phjgt308@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "Erlang RPC Client"
 homepage = "https://github.com/sile/erl_rpc"
 repository = "https://github.com/sile/erl_rpc"
 readme = "README.md"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[badges]
-coveralls = { repository = "sile/erl_rpc" }
 
 [dependencies]
 erl_dist = "0.8"
